@@ -25,10 +25,17 @@ app.use('/participants', participantRoutes);
 app.use('/client', clientRoutes);
 app.use('/organizers', organizerRoutes);
 
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 });
+
+// import route
+const emailRoutes = require('./routes/emailRoutes');
+
+// pakai route
+app.use('/api', emailRoutes);
 
 module.exports = app;
 

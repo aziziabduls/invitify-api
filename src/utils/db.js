@@ -151,9 +151,14 @@ async function initDb() {
     `);
 
     await client.query(`
-      UPDATE event_participants SET reference_id = 'P-' || event_id || '-' || id WHERE reference_id IS NULL
+      ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS attended_at TIMESTAMPTZ
     `);
-    // Organizers Table
+
+    await client.query(`
+      ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS attendance_status VARCHAR(20) DEFAULT 'pending' CHECK (attendance_status IN ('pending', 'attended'))
+    `);
+
+    await client.query('COMMIT');
     await client.query(`
       CREATE TABLE IF NOT EXISTS organizers (
         id SERIAL PRIMARY KEY,

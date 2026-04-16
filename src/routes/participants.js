@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../utils/db');
 const auth = require('../middleware/auth');
+const { sendEmail } = require('../services/emailService');
 
 const router = express.Router();
 
@@ -46,6 +47,105 @@ router.get('/', async (req, res, next) => {
             [req.user.id],
         );
         res.json(result.rows);
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET attendance list for all events owned by user
+router.get('/attendance', async (req, res, next) => {
+    try {
+        const result = await pool.query(
+            `SELECT p.id, p.customer_name, p.customer_email, e.name AS event_name, 
+                    p.attended_at, p.attendance_status AS status
+             FROM event_participants p
+             INNER JOIN events e ON e.id = p.event_id
+             WHERE e.user_id = $1
+             ORDER BY p.attended_at DESC NULLS LAST, p.created_at DESC`,
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST check-in participant
+router.post('/check-in', async (req, res, next) => {
+    const { eventId, participantId, email, type } = req.body;
+    
+    // Check if the request body is correct
+    if (!type || type !== 'attendance_check') {
+        return res.status(400).json({ error: 'Invalid check-in request type' });
+    }
+
+    if (!participantId && !email) {
+        return res.status(400).json({ error: 'participantId or email is required' });
+    }
+
+    try {
+        // 1. Find participant and verify event ownership in one query
+        let query = `
+            SELECT p.id, p.customer_name, p.attendance_status, e.user_id, e.id as event_id
+            FROM event_participants p
+            INNER JOIN events e ON e.id = p.event_id
+            WHERE `;
+        let params = [];
+
+        if (eventId) {
+            // If eventId is provided (QR code scan), strictly match that event
+            query += 'p.event_id = $1 AND ';
+            params.push(eventId);
+            
+            if (participantId) {
+                query += '(p.id::text = $2::text OR p.reference_id = $2::text)';
+                params.push(String(participantId));
+            } else {
+                query += 'p.customer_email = $2';
+                params.push(email);
+            }
+        } else {
+            // If no eventId (manual entry), search across all participant identifiers
+            // but we still need to check ownership later
+            query += '(p.id::text = $1 OR p.reference_id = $1 OR p.customer_email = $1)';
+            params.push(String(participantId || email));
+        }
+
+        const checkResult = await pool.query(query, params);
+
+        if (checkResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Participant not found' });
+        }
+
+        // Handle multiple results if searching by email without eventId
+        const participant = checkResult.rows[0];
+
+        // 2. Verify ownership
+        if (participant.user_id !== req.user.id) {
+            return res.status(403).json({ 
+                error: 'Forbidden', 
+                message: 'You do not have permission to manage attendance for this event.' 
+            });
+        }
+
+        // 3. Check if already attended
+        if (participant.attendance_status === 'attended') {
+            return res.status(400).json({ 
+                error: 'Already Checked In',
+                message: `${participant.customer_name} has already checked in.`
+            });
+        }
+
+        // 4. Update attendance
+        const updateResult = await pool.query(
+            `UPDATE event_participants 
+             SET attendance_status = 'attended', attended_at = NOW(), updated_at = NOW() 
+             WHERE id = $1 
+             RETURNING id, customer_name, attended_at`,
+            [participant.id]
+        );
+
+        res.json(updateResult.rows[0]);
     } catch (err) {
         next(err);
     }
@@ -123,7 +223,129 @@ router.post('/:eventId', async (req, res, next) => {
                 status ?? 'pending_confirmation',
             ],
         );
-        res.status(201).json(result.rows[0]);
+        const created = result.rows[0];
+
+        try {
+            const evRes = await pool.query(
+                'SELECT is_free, price FROM events WHERE id = $1 AND user_id = $2',
+                [eventId, req.user.id],
+            );
+            const ev = evRes.rows[0];
+            const isFree = ev && (ev.is_free === true || Number(ev.price) <= 0);
+            if (isFree) {
+                const payload = {
+                    eventId: eventId,
+                    participantId: created.id,
+                    email: customer_email,
+                    type: 'attendance_check',
+                };
+                await sendEmail({
+                    to: customer_email,
+                    subject: 'Your Attendance QR',
+                    text: JSON.stringify(payload),
+                });
+            }
+        } catch (e) {
+        }
+
+        res.status(201).json(created);
+    } catch (err) {
+        next(err);
+    }
+});
+
+router.post('/:eventId/:id/set_as_paid', async (req, res, next) => {
+    try {
+        const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+        if (!eventId) return res.status(404).json({ error: 'Event not found' });
+        const { id } = req.params;
+        const result = await pool.query(
+            `WITH updated AS (
+                UPDATE event_participants 
+                SET status = 'paid', updated_at = NOW() 
+                WHERE id = $1 AND event_id = $2 
+                RETURNING *
+            )
+            SELECT u.*, e.name as event_name 
+            FROM updated u
+            JOIN events e ON e.id = u.event_id`,
+            [id, eventId],
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Participant not found' });
+        const paid = result.rows[0];
+
+        try {
+            const payload = {
+                eventId: paid.event_id,
+                participantId: paid.id,
+                email: paid.customer_email,
+                type: 'attendance_check',
+            };
+            const QRCode = require('qrcode');
+            const qrBuffer = await QRCode.toBuffer(JSON.stringify(payload), { type: 'png' });
+            const cid = `attendance_qr_${paid.id}`;
+            const html = `
+              <div style="font-family: Arial, sans-serif; line-height:1.6;">
+                <h2>Payment Confirmed</h2>
+                <p>Hi ${paid.customer_name},</p>
+                <p>Your payment has been confirmed. Please show the QR code below at the booth to confirm your attendance.</p>
+                <p><strong>Event ID:</strong> ${paid.event_id}</p>
+                <p><strong>Event Name:</strong> ${paid.event_name}</p>
+                <div style="margin:20px 0;">
+                  <img src="cid:${cid}" alt="Attendance QR" style="width:220px;height:220px;border:1px solid #eee;padding:8px;border-radius:8px;" />
+                </div>
+                <p style="font-size:12px;color:#666;">If the QR is not visible, please enable images for this email.</p>
+              </div>`;
+            await sendEmail({
+                to: paid.customer_email,
+                subject: 'Payment Confirmation & Your Attendance QR',
+                text: 'Payment confirmed. Your QR code is attached.',
+                html,
+                attachments: [
+                    {
+                        filename: `qr-${paid.id}.png`,
+                        content: qrBuffer,
+                        contentType: 'image/png',
+                        cid,
+                    },
+                ],
+            });
+        } catch (e) {
+        }
+
+        res.json(paid);
+    } catch (err) {
+        next(err);
+    }
+});
+
+router.post('/:eventId/:id/block', async (req, res, next) => {
+    try {
+        const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+        if (!eventId) return res.status(404).json({ error: 'Event not found' });
+        const { id } = req.params;
+        const result = await pool.query(
+            `UPDATE event_participants SET status = 'blocked', updated_at = NOW() WHERE id = $1 AND event_id = $2 RETURNING ${participantColumns}`,
+            [id, eventId],
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Participant not found' });
+        res.json(result.rows[0]);
+    } catch (err) {
+        next(err);
+    }
+});
+
+router.post('/:eventId/:id/remove', async (req, res, next) => {
+    try {
+        const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+        if (!eventId) return res.status(404).json({ error: 'Event not found' });
+        const { id } = req.params;
+        const result = await pool.query(
+            'DELETE FROM event_participants WHERE id = $1 AND event_id = $2 RETURNING id',
+            [id, eventId],
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Participant not found' });
+        res.json({ success: true });
     } catch (err) {
         next(err);
     }

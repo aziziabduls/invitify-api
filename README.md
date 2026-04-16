@@ -54,6 +54,117 @@ The API listens on `http://localhost:4000` by default.
   - `PUT /items/:id` – body: `{ "title": "New title", "description": "New desc" }`
   - `DELETE /items/:id`
 
+### ATTENDANCE SERVICE
+Track and manage participant attendance for your events:
+
+- `GET /participants/attendance`
+  - **Goal**: List all attendance data for events owned by the user.
+  - **Header**: `Authorization: Bearer <token>`
+  - **Returns**: Array of `{ id, customer_name, customer_email, event_name, attended_at, status }`
+
+- `POST /participants/check-in`
+  - **Goal**: Check in a participant using QR code data or manual entry.
+  - **Header**: `Authorization: Bearer <token>`
+  - **Request Body (QR Code Format)**:
+    ```json
+    {
+      "eventId": 1,
+      "participantId": "P-1-101",
+      "email": "user@example.com",
+      "type": "attendance_check"
+    }
+    ```
+  - **Request Body (Manual Format)**:
+    ```json
+    {
+      "participantId": "user@example.com",
+      "type": "attendance_check"
+    }
+    ```
+  - **Validation**:
+    - Verifies event ownership by the authenticated user.
+    - Prevents duplicate check-ins.
+    - Updates `attended_at` timestamp.
+
+#### Testing with CURL
+
+1. **Get Attendance List**:
+   ```bash
+   curl -X GET http://localhost:4000/participants/attendance \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN"
+   ```
+
+2. **Check-in Participant**:
+   ```bash
+   curl -X POST http://localhost:4000/participants/check-in \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "eventId": 1,
+       "participantId": "P-1-1",
+       "type": "attendance_check"
+     }'
+   ```
+
+### PARTICIPANT MANAGEMENT
+Authenticated endpoints for managing participants and free-event email notifications:
+
+- `POST /participants/:eventId`
+  - Registers a participant for an event you own.
+  - Behavior for free events: If the event is free (`events.is_free = true` or `price <= 0`), the API automatically sends an email to the participant with a JSON payload to be used for booth check-in:
+    ```json
+    {
+      "eventId": 9,
+      "participantId": 8,
+      "email": "azi@mail.com",
+      "type": "attendance_check"
+    }
+    ```
+  - Requires environment variables for email:
+    - `EMAIL_USER` and `EMAIL_PASS` (Gmail example) used by `src/services/emailService.js`.
+
+- `POST /participants/:eventId/:id/set_as_paid`
+  - Sets the participant status to `paid`.
+  - Header: `Authorization: Bearer <token>`
+  - Sends a confirmation email with an embedded QR code image (PNG data URL). The QR encodes:
+    ```json
+    {
+      "eventId": 9,
+      "participantId": 8,
+      "email": "azi@mail.com",
+      "type": "attendance_check"
+    }
+    ```
+  - Requires `EMAIL_USER`, `EMAIL_PASS` (Gmail example) and the `qrcode` package.
+
+- `POST /participants/:eventId/:id/block`
+  - Sets the participant status to `blocked`.
+  - Header: `Authorization: Bearer <token>`
+
+- `POST /participants/:eventId/:id/remove`
+  - Removes the participant (convenience wrapper around `DELETE`).
+  - Header: `Authorization: Bearer <token>`
+
+#### Testing with CURL
+
+1. Set participant as paid:
+   ```bash
+   curl -X POST http://localhost:4000/participants/9/8/set_as_paid \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN"
+   ```
+
+2. Block participant:
+   ```bash
+   curl -X POST http://localhost:4000/participants/9/8/block \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN"
+   ```
+
+3. Remove participant:
+   ```bash
+   curl -X POST http://localhost:4000/participants/9/8/remove \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN"
+   ```
+
 ### 5. Monolith vs microservice
 
 This project is a **monolith**: a single service containing auth + CRUD.
