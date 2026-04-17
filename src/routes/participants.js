@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../utils/db');
 const auth = require('../middleware/auth');
 const { sendEmail } = require('../services/emailService');
+const { markAsPaid } = require('../services/participantService');
 
 const router = express.Router();
 
@@ -258,61 +259,10 @@ router.post('/:eventId/:id/set_as_paid', async (req, res, next) => {
     try {
         const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
         if (!eventId) return res.status(404).json({ error: 'Event not found' });
-        const { id } = req.params;
-        const result = await pool.query(
-            `WITH updated AS (
-                UPDATE event_participants 
-                SET status = 'paid', updated_at = NOW() 
-                WHERE id = $1 AND event_id = $2 
-                RETURNING *
-            )
-            SELECT u.*, e.name as event_name 
-            FROM updated u
-            JOIN events e ON e.id = u.event_id`,
-            [id, eventId],
-        );
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Participant not found' });
-        const paid = result.rows[0];
-
-        try {
-            const payload = {
-                eventId: paid.event_id,
-                participantId: paid.id,
-                email: paid.customer_email,
-                type: 'attendance_check',
-            };
-            const QRCode = require('qrcode');
-            const qrBuffer = await QRCode.toBuffer(JSON.stringify(payload), { type: 'png' });
-            const cid = `attendance_qr_${paid.id}`;
-            const html = `
-              <div style="font-family: Arial, sans-serif; line-height:1.6;">
-                <h2>Payment Confirmed</h2>
-                <p>Hi ${paid.customer_name},</p>
-                <p>Your payment has been confirmed. Please show the QR code below at the booth to confirm your attendance.</p>
-                <p><strong>Event ID:</strong> ${paid.event_id}</p>
-                <p><strong>Event Name:</strong> ${paid.event_name}</p>
-                <div style="margin:20px 0;">
-                  <img src="cid:${cid}" alt="Attendance QR" style="width:220px;height:220px;border:1px solid #eee;padding:8px;border-radius:8px;" />
-                </div>
-                <p style="font-size:12px;color:#666;">If the QR is not visible, please enable images for this email.</p>
-              </div>`;
-            await sendEmail({
-                to: paid.customer_email,
-                subject: 'Payment Confirmation & Your Attendance QR',
-                text: 'Payment confirmed. Your QR code is attached.',
-                html,
-                attachments: [
-                    {
-                        filename: `qr-${paid.id}.png`,
-                        content: qrBuffer,
-                        contentType: 'image/png',
-                        cid,
-                    },
-                ],
-            });
-        } catch (e) {
-        }
-
+        
+        const paid = await markAsPaid(req.params.id, eventId);
+        if (!paid) return res.status(404).json({ error: 'Participant not found' });
+        
         res.json(paid);
     } catch (err) {
         next(err);

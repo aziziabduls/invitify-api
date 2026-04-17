@@ -8,6 +8,7 @@ const eventRoutes = require('./routes/events');
 const participantRoutes = require('./routes/participants');
 const clientRoutes = require('./routes/client');
 const organizerRoutes = require('./routes/organizers');
+const paymentRouter = require('./routes/payment');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.use('/events', eventRoutes);
 app.use('/participants', participantRoutes);
 app.use('/client', clientRoutes);
 app.use('/organizers', organizerRoutes);
+app.use('/api/payment', paymentRouter);
 
 
 app.use((err, req, res, next) => {

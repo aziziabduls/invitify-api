@@ -1,5 +1,7 @@
 const express = require('express');
+const axios = require('axios');
 const { pool } = require('../utils/db');
+const { BASE_URL, encodeClientId, generateSignature } = require('../helpers/primavista');
 
 const router = express.Router();
 
@@ -174,8 +176,17 @@ router.post('/participants', async (req, res, next) => {
       return res.status(400).json({ error: 'eventId is required' });
     }
 
-    const eventCheck = await pool.query('SELECT id FROM events WHERE id = $1', [eventId]);
-    if (eventCheck.rows.length === 0) {
+    // Fetch event and organizer data
+    const eventResult = await pool.query(
+      `SELECT e.name, e.price, o.name as organizer_name 
+       FROM events e 
+       LEFT JOIN organizer_events oe ON e.id = oe.event_id 
+       LEFT JOIN organizers o ON oe.organizer_id = o.id 
+       WHERE e.id = $1`,
+      [eventId]
+    );
+    const eventData = eventResult.rows[0];
+    if (!eventData) {
       return res.status(404).json({ error: 'Event not found' });
     }
 
@@ -218,7 +229,82 @@ router.post('/participants', async (req, res, next) => {
     );
     const row = result.rows[0];
     const referenceId = 'P-' + row.event_id + '-' + row.id;
-    res.status(201).json({ ...row, reference_id: referenceId });
+    // referenceID mus include like this
+    //  const params = new URLSearchParams({
+    //     eventId: event.id.toString(),
+    //     name: formData.name,
+    //     email: formData.email,
+    //     ...(participantId && { participantId: participantId.toString() })
+    //   });
+    //   router.push(`/checkout/waiting?${params.toString()}`);
+
+    let payment_url = null;
+
+    const finalPriceInt = Math.round(Number(row.final_price));
+
+    if (finalPriceInt > 0) {
+      const timestamp = new Date().toISOString();
+      const apiUrl = process.env.API_BASE_URL || 'http://localhost:4000';
+      const webUrl = process.env.WEB_BASE_URL || 'http://localhost:3000';
+      const merchantName = eventData.organizer_name || 'Invitify';
+      const eventName = eventData.name || 'Event Registration';
+
+      const callbackUrl = `${webUrl}/checkout/waiting?referenceId=${referenceId}&email=${encodeURIComponent(row.customer_email)}&name=${encodeURIComponent(row.customer_name)}&eventId=${eventId}&participantId=${row.id}`;
+
+      const signature = generateSignature({
+        expiresIn: '120',
+        orderId: referenceId,
+        userId: '1',
+        merchantName: merchantName,
+        paymentMethod: 'QRIS',
+        totalAmount: finalPriceInt,
+        customerName: row.customer_name,
+        currency: 'IDR',
+        pushUrl: `${apiUrl}/api/payment/webhook`,
+        callbackUrl,
+        timestamp,
+      });
+
+      const payload = {
+        expires_in: '120',
+        order_id: referenceId,
+        user_id: '1',
+        merchant_name: merchantName,
+        payment_method: 'QRIS',
+        total_amount: finalPriceInt,
+        customer_name: row.customer_name,
+        currency: 'IDR',
+        push_url: `${apiUrl}/api/payment/webhook`,
+        callback_url: callbackUrl,
+        items: [
+          {
+            name: eventName.substring(0, 20), // Max length per PDF is 20
+            quantity: 1,
+            amount: finalPriceInt,
+            product_type: 'Event Ticket'
+          },
+        ],
+        'x-timestamp': timestamp,
+        'x-client-id': encodeClientId(),
+        'x-signature': signature,
+      };
+
+      try {
+        const pvRes = await axios.post(`${BASE_URL}/api/v2.1/payment/create`, payload, {
+          headers: { 'Content-Type': 'application/json' },
+          maxRedirects: 0,
+          validateStatus: (s) => s < 400,
+        });
+        payment_url = pvRes.request.res?.responseUrl || pvRes.data?.redirect_url || pvRes.data;
+        if (typeof payment_url === 'string' && payment_url.startsWith('/')) {
+          payment_url = BASE_URL + payment_url;
+        }
+      } catch (err) {
+        console.error('[PV] create error:', err.response?.data || err.name);
+      }
+    }
+
+    res.status(201).json({ ...row, reference_id: referenceId, payment_url });
   } catch (err) {
     next(err);
   }
