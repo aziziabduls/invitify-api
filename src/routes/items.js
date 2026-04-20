@@ -1,10 +1,10 @@
 const express = require('express');
 const { pool } = require('../utils/db');
-const auth = require('../middleware/auth');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(auth);
+router.use(authMiddleware);
 
 router.get('/', async (req, res, next) => {
   try {

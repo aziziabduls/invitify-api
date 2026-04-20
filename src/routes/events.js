@@ -1,10 +1,10 @@
 const express = require('express');
 const { pool } = require('../utils/db');
-const auth = require('../middleware/auth');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(auth);
+router.use(authMiddleware);
 
 const eventColumns =
   'id, user_id, name, tagline, logo_url, image_url, start_date, end_date, timezone, location, location_url, is_free, price, currency, max_participants, is_shared_album_enabled, about, status, created_at, updated_at';
@@ -13,7 +13,12 @@ const rundownColumns = 'id, event_id, rundown_date, rundown_time, title, descrip
 const brandColumns = 'id, event_id, name, icon_url, created_at';
 const promoCodeColumns = 'id, event_id, code, type, value, usage_limit, created_at';
 
-async function assertEventOwnership(eventId, userId) {
+async function assertEventOwnership(eventId, userId, role) {
+  if (role === 'SUPER_ADMIN') {
+    const r = await pool.query('SELECT id FROM events WHERE id = $1', [eventId]);
+    if (r.rows.length === 0) return null;
+    return r.rows[0].id;
+  }
   const r = await pool.query('SELECT id FROM events WHERE id = $1 AND user_id = $2', [eventId, userId]);
   if (r.rows.length === 0) return null;
   return r.rows[0].id;
@@ -38,10 +43,13 @@ async function getEventWithNested(eventId) {
 
 router.get('/', async (req, res, next) => {
   try {
-    const eventsResult = await pool.query(
-      `SELECT ${eventColumns} FROM events WHERE user_id = $1 ORDER BY start_date ASC`,
-      [req.user.id],
-    );
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const query = isSuperAdmin
+      ? `SELECT ${eventColumns} FROM events ORDER BY start_date ASC`
+      : `SELECT ${eventColumns} FROM events WHERE user_id = $1 ORDER BY start_date ASC`;
+    const params = isSuperAdmin ? [] : [req.user.id];
+
+    const eventsResult = await pool.query(query, params);
     const list = await Promise.all(
       eventsResult.rows.map((row) => getEventWithNested(row.id)),
     );
@@ -51,14 +59,60 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// GET /events/upcoming - List 4 events coming soon
+router.get('/upcoming', async (req, res, next) => {
+  try {
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const query = isSuperAdmin
+      ? `SELECT ${eventColumns} FROM events WHERE start_date >= NOW() ORDER BY start_date ASC LIMIT 4`
+      : `SELECT ${eventColumns} FROM events WHERE user_id = $1 AND start_date >= NOW() ORDER BY start_date ASC LIMIT 4`;
+    const params = isSuperAdmin ? [] : [req.user.id];
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /events/calendar - List events for a specific month and year
+router.get('/calendar', async (req, res, next) => {
+  try {
+    const { month, year } = req.query;
+    if (!month || !year) {
+      return res.status(400).json({ error: 'month and year are required' });
+    }
+
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const startOfMonth = `${year}-${month.toString().padStart(2, '0')}-01`;
+    const endOfMonth = new Date(year, month, 0).toISOString().split('T')[0];
+
+    const query = isSuperAdmin
+      ? `SELECT ${eventColumns} FROM events WHERE start_date BETWEEN $1 AND $2 ORDER BY start_date ASC`
+      : `SELECT ${eventColumns} FROM events WHERE user_id = $3 AND start_date BETWEEN $1 AND $2 ORDER BY start_date ASC`;
+    
+    const params = isSuperAdmin 
+      ? [startOfMonth, endOfMonth] 
+      : [startOfMonth, endOfMonth, req.user.id];
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 router.get('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const result = await pool.query(
-      `SELECT id FROM events WHERE id = $1 AND user_id = $2`,
-      [id, req.user.id],
-    );
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const query = isSuperAdmin
+      ? `SELECT id FROM events WHERE id = $1`
+      : `SELECT id FROM events WHERE id = $1 AND user_id = $2`;
+    const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+    const result = await pool.query(query, params);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
     }
@@ -232,7 +286,7 @@ router.post('/', async (req, res, next) => {
 // ---- Event rundowns ----
 router.get('/:eventId/rundowns', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       `SELECT ${rundownColumns} FROM event_rundowns WHERE event_id = $1 ORDER BY rundown_date, rundown_time`,
@@ -246,7 +300,7 @@ router.get('/:eventId/rundowns', async (req, res, next) => {
 
 router.post('/:eventId/rundowns', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { rundown_date, rundown_time, title, description, image_url } = req.body;
     if (!rundown_date || !rundown_time || !title) {
@@ -265,7 +319,7 @@ router.post('/:eventId/rundowns', async (req, res, next) => {
 
 router.put('/:eventId/rundowns/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { id } = req.params;
     const { rundown_date, rundown_time, title, description, image_url } = req.body;
@@ -288,7 +342,7 @@ router.put('/:eventId/rundowns/:id', async (req, res, next) => {
 
 router.delete('/:eventId/rundowns/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       'DELETE FROM event_rundowns WHERE id = $1 AND event_id = $2 RETURNING id',
@@ -304,7 +358,7 @@ router.delete('/:eventId/rundowns/:id', async (req, res, next) => {
 // ---- Event brands ----
 router.get('/:eventId/brands', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       `SELECT ${brandColumns} FROM event_brands WHERE event_id = $1 ORDER BY id`,
@@ -318,7 +372,7 @@ router.get('/:eventId/brands', async (req, res, next) => {
 
 router.post('/:eventId/brands', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { name, icon_url } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -334,7 +388,7 @@ router.post('/:eventId/brands', async (req, res, next) => {
 
 router.put('/:eventId/brands/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { id } = req.params;
     const { name, icon_url } = req.body;
@@ -352,7 +406,7 @@ router.put('/:eventId/brands/:id', async (req, res, next) => {
 
 router.delete('/:eventId/brands/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       'DELETE FROM event_brands WHERE id = $1 AND event_id = $2 RETURNING id',
@@ -368,7 +422,7 @@ router.delete('/:eventId/brands/:id', async (req, res, next) => {
 // ---- Event promo codes ----
 router.get('/:eventId/promo-codes', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       `SELECT ${promoCodeColumns} FROM event_promo_codes WHERE event_id = $1 ORDER BY id`,
@@ -382,7 +436,7 @@ router.get('/:eventId/promo-codes', async (req, res, next) => {
 
 router.post('/:eventId/promo-codes', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { code, type, value, usage_limit } = req.body;
     if (!code || !type || value == null) {
@@ -403,7 +457,7 @@ router.post('/:eventId/promo-codes', async (req, res, next) => {
 
 router.put('/:eventId/promo-codes/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const { id } = req.params;
     const { code, type, value, usage_limit } = req.body;
@@ -425,7 +479,7 @@ router.put('/:eventId/promo-codes/:id', async (req, res, next) => {
 
 router.delete('/:eventId/promo-codes/:id', async (req, res, next) => {
   try {
-    const eventId = await assertEventOwnership(req.params.eventId, req.user.id);
+    const eventId = await assertEventOwnership(req.params.eventId, req.user.id, req.user.role);
     if (!eventId) return res.status(404).json({ error: 'Event not found' });
     const result = await pool.query(
       'DELETE FROM event_promo_codes WHERE id = $1 AND event_id = $2 RETURNING id',

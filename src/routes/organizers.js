@@ -1,9 +1,9 @@
 const express = require('express');
 const { pool } = require('../utils/db');
-const auth = require('../middleware/auth');
+const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 
-router.use(auth);
+router.use(authMiddleware);
 
 const organizerColumns = 'id, user_id, name, domain, scope, category, format, created_at, updated_at';
 
@@ -11,8 +11,11 @@ const organizerColumns = 'id, user_id, name, domain, scope, category, format, cr
 router.get('/', async (req, res, next) => {
     try {
         const { name, domain } = req.query;
-        let query = `SELECT ${organizerColumns} FROM organizers WHERE user_id = $1`;
-        const params = [req.user.id];
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        let query = isSuperAdmin
+            ? `SELECT ${organizerColumns} FROM organizers WHERE 1=1`
+            : `SELECT ${organizerColumns} FROM organizers WHERE user_id = $1`;
+        const params = isSuperAdmin ? [] : [req.user.id];
 
         if (name || domain) {
             if (name) {
@@ -77,7 +80,13 @@ router.post('/', async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
     try {
         const { id } = req.params;
-        const result = await pool.query(`SELECT ${organizerColumns} FROM organizers WHERE id = $1 AND user_id = $2`, [id, req.user.id]);
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        const query = isSuperAdmin
+            ? `SELECT ${organizerColumns} FROM organizers WHERE id = $1`
+            : `SELECT ${organizerColumns} FROM organizers WHERE id = $1 AND user_id = $2`;
+        const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+        const result = await pool.query(query, params);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Organizer not found' });
@@ -95,7 +104,14 @@ router.get('/:id/events', async (req, res, next) => {
         const { id } = req.params;
 
         // First check if organizer exists and belongs to user
-        const organizer = await pool.query('SELECT id FROM organizers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+        // First check if organizer exists
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        const query = isSuperAdmin
+            ? 'SELECT id FROM organizers WHERE id = $1'
+            : 'SELECT id FROM organizers WHERE id = $1 AND user_id = $2';
+        const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+        const organizer = await pool.query(query, params);
         if (organizer.rows.length === 0) {
             return res.status(404).json({ error: 'Organizer not found' });
         }
@@ -125,7 +141,14 @@ router.post('/:id/events', async (req, res, next) => {
         }
 
         // Check if organizer exists and belongs to user
-        const organizer = await pool.query('SELECT id FROM organizers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+        // Check if organizer exists
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        const query = isSuperAdmin
+            ? 'SELECT id FROM organizers WHERE id = $1'
+            : 'SELECT id FROM organizers WHERE id = $1 AND user_id = $2';
+        const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+        const organizer = await pool.query(query, params);
         if (organizer.rows.length === 0) {
             return res.status(404).json({ error: 'Organizer not found' });
         }
@@ -162,7 +185,14 @@ router.delete('/:id/events/:eventId', async (req, res, next) => {
         const { id, eventId } = req.params;
 
         // Check if organizer exists and belongs to user
-        const organizer = await pool.query('SELECT id FROM organizers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+        // Check if organizer exists
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        const query = isSuperAdmin
+            ? 'SELECT id FROM organizers WHERE id = $1'
+            : 'SELECT id FROM organizers WHERE id = $1 AND user_id = $2';
+        const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+        const organizer = await pool.query(query, params);
         if (organizer.rows.length === 0) {
             return res.status(404).json({ error: 'Organizer not found' });
         }
@@ -188,7 +218,13 @@ router.delete('/:id', async (req, res, next) => {
     try {
         const { id } = req.params;
 
-        const result = await pool.query('DELETE FROM organizers WHERE id = $1 AND user_id = $2 RETURNING id', [id, req.user.id]);
+        const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+        const query = isSuperAdmin
+            ? 'DELETE FROM organizers WHERE id = $1 RETURNING id'
+            : 'DELETE FROM organizers WHERE id = $1 AND user_id = $2 RETURNING id';
+        const params = isSuperAdmin ? [id] : [id, req.user.id];
+
+        const result = await pool.query(query, params);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Organizer not found' });

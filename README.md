@@ -213,3 +213,20 @@ Manage event organizers and their relationships with events:
   - Goal: Unlink an event from an organizer.
 - `DELETE /organizers/:id`
   - Goal: Remove an organizer and its associations.
+
+---
+
+## Role System
+- **SUPER_ADMIN**: Full access to all organizers, events, participants, and role management. Can see all data across the platform.
+- **EVENT_ORGANIZER**: Manage their own organizers, events, and participants. Access is isolated to their own records.
+- **INCIDENTAL**: Minimal access, primarily used for booth attendance check-in. Can show all menus but is restricted from modifying data outside of attendance.
+
+## Admin Service (SUPER_ADMIN only)
+- **GET /admin/users**: List all users with their roles.
+- **PATCH /admin/users/:id/role**: Update a user's role.
+  - Body: `{ "role_name": "SUPER_ADMIN" | "EVENT_ORGANIZER" | "INCIDENTAL" }`
+- **GET /admin/roles**: List all roles.
+- **GET /admin/menus**: List all menus.
+- **GET /admin/roles/:id/menus**: Get menus assigned to a role.
+- **POST /admin/roles/:id/menus**: Assign menus to a role.
+  - Body: `{ "menu_ids": [number, ...] }`
