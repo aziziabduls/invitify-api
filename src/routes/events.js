@@ -64,7 +64,7 @@ router.get('/upcoming', async (req, res, next) => {
   try {
     const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
     const query = isSuperAdmin
-      ? `SELECT ${eventColumns} FROM events WHERE start_date >= NOW() ORDER BY start_date ASC LIMIT 4`
+      ? `SELECT ${eventColumns} FROM events WHERE start_date >= NOW() ORDER BY start_date ASC LIMIT 5`
       : `SELECT ${eventColumns} FROM events WHERE user_id = $1 AND start_date >= NOW() ORDER BY start_date ASC LIMIT 4`;
     const params = isSuperAdmin ? [] : [req.user.id];
 
@@ -90,9 +90,9 @@ router.get('/calendar', async (req, res, next) => {
     const query = isSuperAdmin
       ? `SELECT ${eventColumns} FROM events WHERE start_date BETWEEN $1 AND $2 ORDER BY start_date ASC`
       : `SELECT ${eventColumns} FROM events WHERE user_id = $3 AND start_date BETWEEN $1 AND $2 ORDER BY start_date ASC`;
-    
-    const params = isSuperAdmin 
-      ? [startOfMonth, endOfMonth] 
+
+    const params = isSuperAdmin
+      ? [startOfMonth, endOfMonth]
       : [startOfMonth, endOfMonth, req.user.id];
 
     const result = await pool.query(query, params);
@@ -549,9 +549,16 @@ router.patch('/:id/status', async (req, res, next) => {
       status === 'inactive'
         ? 'status = $1, end_date = NOW(), updated_at = NOW()'
         : 'status = $1, updated_at = NOW()';
+
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const whereClause = isSuperAdmin
+      ? 'WHERE id = $2'
+      : 'WHERE id = $2 AND user_id = $3';
+    const params = isSuperAdmin ? [status, id] : [status, id, req.user.id];
+
     const result = await pool.query(
-      `UPDATE events SET ${updates} WHERE id = $2 AND user_id = $3 RETURNING ${eventColumns}`,
-      [status, id, req.user.id],
+      `UPDATE events SET ${updates} ${whereClause} RETURNING ${eventColumns}`,
+      params,
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
@@ -590,6 +597,30 @@ router.put('/:id', async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const whereClause = isSuperAdmin
+      ? 'WHERE id = $16'
+      : 'WHERE id = $16 AND user_id = $17';
+    const queryParams = [
+      name ?? null,
+      tagline ?? null,
+      logo_url ?? null,
+      image_url ?? null,
+      start_date ?? null,
+      end_date ?? null,
+      timezone ?? null,
+      location ?? null,
+      location_url ?? null,
+      is_free ?? null,
+      price ?? null,
+      currency ?? null,
+      max_participants ?? null,
+      is_shared_album_enabled ?? null,
+      about ?? null,
+      id,
+    ];
+    if (!isSuperAdmin) queryParams.push(req.user.id);
+
     const eventResult = await client.query(
       `UPDATE events SET
         name = COALESCE($1, name),
@@ -608,27 +639,9 @@ router.put('/:id', async (req, res, next) => {
         is_shared_album_enabled = COALESCE($14, is_shared_album_enabled),
         about = COALESCE($15, about),
         updated_at = NOW()
-      WHERE id = $16 AND user_id = $17
+      ${whereClause}
       RETURNING ${eventColumns}`,
-      [
-        name ?? null,
-        tagline ?? null,
-        logo_url ?? null,
-        image_url ?? null,
-        start_date ?? null,
-        end_date ?? null,
-        timezone ?? null,
-        location ?? null,
-        location_url ?? null,
-        is_free ?? null,
-        price ?? null,
-        currency ?? null,
-        max_participants ?? null,
-        is_shared_album_enabled ?? null,
-        about ?? null,
-        id,
-        req.user.id,
-      ],
+      queryParams,
     );
 
     if (eventResult.rows.length === 0) {
@@ -640,6 +653,8 @@ router.put('/:id', async (req, res, next) => {
     const datesChanged = start_date != null || end_date != null;
 
     if (datesChanged) {
+      const whereClause = isSuperAdmin ? 'WHERE id = $1' : 'WHERE id = $1 AND user_id = $2';
+      const params = isSuperAdmin ? [id] : [id, req.user.id];
       await client.query(
         `UPDATE events 
          SET status = CASE 
@@ -647,8 +662,8 @@ router.put('/:id', async (req, res, next) => {
            ELSE status
          END,
          updated_at = NOW()
-         WHERE id = $1 AND user_id = $2`,
-        [id, req.user.id],
+         ${whereClause}`,
+        params,
       );
     }
 
@@ -702,9 +717,13 @@ router.put('/:id', async (req, res, next) => {
 router.delete('/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    const whereClause = isSuperAdmin ? 'WHERE id = $1' : 'WHERE id = $1 AND user_id = $2';
+    const params = isSuperAdmin ? [id] : [id, req.user.id];
+
     const result = await pool.query(
-      'DELETE FROM events WHERE id = $1 AND user_id = $2 RETURNING id',
-      [id, req.user.id],
+      `DELETE FROM events ${whereClause} RETURNING id`,
+      params,
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Event not found' });
